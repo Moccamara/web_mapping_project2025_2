@@ -39,7 +39,7 @@ def logout():
     st.session_state.username = None
     st.session_state.user_role = None
     st.session_state.points_gdf = None
-    st.experimental_rerun()  # ✅ updated
+    st.rerun()
 
 # =========================================================
 # LOGIN
@@ -48,13 +48,14 @@ if not st.session_state.auth_ok:
     st.sidebar.header("🔐 Login")
     username = st.sidebar.selectbox("User", list(USERS.keys()))
     password = st.sidebar.text_input("Password", type="password")
+
     if st.sidebar.button("Login", use_container_width=True):
         if password == USERS[username]["password"]:
             st.session_state.auth_ok = True
             st.session_state.username = username
             st.session_state.user_role = USERS[username]["role"]
             st.success("✅ Login successful")
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.sidebar.error("❌ Incorrect password")
     st.stop()
@@ -67,7 +68,10 @@ SE_URL = "https://raw.githubusercontent.com/Moccamara/web_mapping/master/data/SE
 @st.cache_data(show_spinner=False)
 def load_se_data(url):
     gdf = gpd.read_file(url)
-    gdf = gdf.to_crs(epsg=4326) if gdf.crs else gdf.set_crs(epsg=4326)
+    if gdf.crs is None:
+        gdf = gdf.set_crs(epsg=4326)
+    else:
+        gdf = gdf.to_crs(epsg=4326)
     gdf.columns = gdf.columns.str.lower().str.strip()
     gdf = gdf.rename(columns={"lregion":"region","lcercle":"cercle","lcommune":"commune"})
     gdf = gdf[gdf.is_valid & ~gdf.is_empty]
@@ -200,7 +204,9 @@ if points_to_plot is not None:
         ).add_to(m)
 
 MeasureControl().add_to(m)
-Draw(export=True).add_to(m)
+# Add Draw plugin (both polygon and marker)
+draw_control = Draw(export=True, draw_options={"polyline": False, "rectangle": False, "circle": False, "circlemarker": False})
+draw_control.add_to(m)
 
 # =========================================================
 # ✅ LIVE CURSOR COORDINATES
@@ -221,9 +227,41 @@ folium.LayerControl(collapsed=True).add_to(m)
 # =========================================================
 col_map, col_chart = st.columns((3,1), gap="small")
 with col_map:
-    map_data = st_folium(m, height=500, returned_objects=["all_drawings"], use_container_width=True)
+    # Display map and capture drawn polygons & markers
+    map_data = st_folium(
+        m,
+        height=500,
+        returned_objects=["all_drawings"],
+        use_container_width=True
+    )
 
-    # Polygon-based statistics
+    # ================================
+    # DYNAMIC MARKER TABLE AND CSV
+    # ================================
+    markers_list = []
+
+    if map_data and "all_drawings" in map_data and map_data["all_drawings"]:
+        for feature in map_data["all_drawings"]:
+            geom_type = feature["geometry"]["type"]
+            geom_shape = shape(feature["geometry"])
+
+            if geom_type == "Point":
+                markers_list.append((geom_shape.y, geom_shape.x))
+
+    if markers_list:
+        markers_df = pd.DataFrame(markers_list, columns=["Latitude", "Longitude"])
+        st.subheader("📍 Drawn Markers Coordinates (Dynamic Table)")
+        st.dataframe(markers_df)
+
+        csv = markers_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Marker Coordinates CSV",
+            data=csv,
+            file_name="markers_coordinates.csv",
+            mime="text/csv"
+        )
+
+    # Polygon-based statistics (existing logic for polygons)
     if map_data and "all_drawings" in map_data and map_data["all_drawings"]:
         last_feature = map_data["all_drawings"][-1]
         drawn_polygon = shape(last_feature["geometry"])
@@ -241,6 +279,7 @@ with col_map:
                     st.dataframe(pts_in_polygon)
 
 with col_chart:
+    # Population bar chart
     if idse_selected=="No filter":
         st.info("Select SE.")
     else:
@@ -265,13 +304,16 @@ with col_chart:
         if points_gdf is not None and {"Masculin","Feminin"}.issubset(points_gdf.columns):
             gdf_idse_simple = gdf_idse.explode(ignore_index=True)
             pts_inside = safe_sjoin(points_gdf, gdf_idse_simple, predicate="intersects")
-            m_total = int(pts_inside["Masculin"].sum()) if not pts_inside.empty else 0
-            f_total = int(pts_inside["Feminin"].sum()) if not pts_inside.empty else 0
+            if not pts_inside.empty:
+                m_total = int(pts_inside["Masculin"].sum())
+                f_total = int(pts_inside["Feminin"].sum())
+            else:
+                m_total, f_total = 0,0
             st.markdown(f"- 👨 **M**: {m_total}  \n- 👩 **F**: {f_total}  \n- 👥 **Total**: {m_total+f_total}")
+
             fig, ax = plt.subplots(figsize=(3,3))
             if m_total + f_total > 0:
-                ax.pie([m_total,f_total], labels=["M","F"], autopct="%1.1f%%", startangle=90,
-                       colors=["#1f77b4","#ff7f0e"])
+                ax.pie([m_total,f_total], labels=["M","F"], autopct="%1.1f%%", startangle=90, colors=["#1f77b4","#ff7f0e"])
             else:
                 ax.pie([1], labels=["No data"], colors=["lightgrey"])
             ax.axis("equal")
@@ -285,4 +327,3 @@ st.markdown("""
 **Geospatial Enterprise Web Mapping** Developed with Streamlit, Folium & GeoPandas  
 **Dr. CAMARA MOC, PhD – Geomatics Engineering** © 2025
 """)
-
