@@ -110,8 +110,11 @@ def load_points_from_github(url):
 # =========================================================
 # POINTS SOURCE LOGIC
 # =========================================================
-points_gdf = st.session_state.points_gdf or load_points_from_github(POINTS_URL)
-st.session_state.points_gdf = points_gdf
+if st.session_state.points_gdf is not None:
+    points_gdf = st.session_state.points_gdf
+else:
+    points_gdf = load_points_from_github(POINTS_URL)
+    st.session_state.points_gdf = points_gdf
 
 # =========================================================
 # SAFE SPATIAL JOIN
@@ -282,3 +285,4 @@ st.markdown("""
 **Geospatial Enterprise Web Mapping** Developed with Streamlit, Folium & GeoPandas  
 **Dr. CAMARA MOC, PhD – Geomatics Engineering** © 2025
 """)
+
