@@ -6,7 +6,7 @@ from folium.plugins import MeasureControl, Draw, MousePosition
 import pandas as pd
 import altair as alt
 import matplotlib.pyplot as plt
-from shapely.geometry import shape, Point
+from shapely.geometry import shape, Point, Polygon, MultiPolygon, MultiPoint, GeometryCollection
 
 # =========================================================
 # APP CONFIG
@@ -35,8 +35,10 @@ if "auth_ok" not in st.session_state:
 # LOGOUT
 # =========================================================
 def logout():
-    for k in ["auth_ok", "username", "user_role", "points_gdf"]:
-        st.session_state[k] = None
+    st.session_state.auth_ok = False
+    st.session_state.username = None
+    st.session_state.user_role = None
+    st.session_state.points_gdf = None
     st.experimental_rerun()
 
 # =========================================================
@@ -100,7 +102,11 @@ def load_points_from_github(url):
         df["LAT"] = pd.to_numeric(df["LAT"], errors="coerce")
         df["LON"] = pd.to_numeric(df["LON"], errors="coerce")
         df = df.dropna(subset=["LAT","LON"])
-        return gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df["LON"], df["LAT"]), crs="EPSG:4326")
+        return gpd.GeoDataFrame(
+            df,
+            geometry=gpd.points_from_xy(df["LON"], df["LAT"]),
+            crs="EPSG:4326"
+        )
     except:
         return None
 
@@ -118,7 +124,10 @@ else:
 # =========================================================
 def safe_sjoin(points, polygons, how="inner", predicate="intersects"):
     if points is None or points.empty or polygons is None or polygons.empty:
-        return gpd.GeoDataFrame(columns=points.columns if points is not None else [], crs=points.crs if points is not None else None)
+        return gpd.GeoDataFrame(
+            columns=points.columns if points is not None else [],
+            crs=points.crs if points is not None else None
+        )
     for col in ["index_right", "_r"]:
         if col in polygons.columns:
             polygons = polygons.drop(columns=[col])
@@ -147,22 +156,11 @@ with st.sidebar:
     idse_selected = st.selectbox("Unit_Geo", idse_list)
     gdf_idse = gdf_commune if idse_selected=="No filter" else gdf_commune[gdf_commune["idse_new"]==idse_selected]
 
-    # Spatial Query (Admin only)
-    pts_inside_map = None
-    if st.session_state.user_role=="Admin":
-        st.markdown("### 🛰️ Spatial Query")
-        run_query = st.button("Run Spatial Query")
-        if run_query and points_gdf is not None:
-            pts_inside_map = safe_sjoin(points_gdf, gdf_idse, predicate="intersects")
-            st.success(f"✅ Spatial query returned {len(pts_inside_map)} points inside selected SE.")
-
 # =========================================================
-# MAP SETUP
+# MAP
 # =========================================================
 minx, miny, maxx, maxy = gdf_idse.total_bounds
 m = folium.Map(location=[(miny+maxy)/2, (minx+maxx)/2], zoom_start=18)
-
-# Both basemaps
 folium.TileLayer("OpenStreetMap").add_to(m)
 folium.TileLayer(
     tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -180,17 +178,42 @@ folium.GeoJson(
 ).add_to(m)
 
 # Add points
-points_to_plot = pts_inside_map if (st.session_state.user_role=="Admin" and pts_inside_map is not None) else points_gdf
-if points_to_plot is not None:
-    points_to_plot = points_to_plot.to_crs(gdf_idse.crs)
-    for _, r in points_to_plot.iterrows():
-        folium.CircleMarker(location=[r.geometry.y, r.geometry.x], radius=3, color="red", fill=True, fill_opacity=0.8).add_to(m)
+if points_gdf is not None:
+    for _, r in points_gdf.iterrows():
+        folium.CircleMarker(
+            location=[r.geometry.y, r.geometry.x],
+            radius=3,
+            color="red",
+            fill=True,
+            fill_opacity=0.8
+        ).add_to(m)
 
-# Plugins
 MeasureControl().add_to(m)
-MousePosition(position="bottomright", separator=" | ", empty_string="Move cursor", lng_first=True, num_digits=6, prefix="Coordinates:").add_to(m)
 Draw(export=True).add_to(m)
-folium.LayerControl().add_to(m)  # allow switching basemaps
+MousePosition(
+    position="bottomright",
+    separator=" | ",
+    empty_string="Move cursor",
+    lng_first=True,
+    num_digits=6,
+    prefix="Coordinates:"
+).add_to(m)
+folium.LayerControl(collapsed=True).add_to(m)
+
+# =========================================================
+# FUNCTIONS
+# =========================================================
+def get_coords(geom):
+    coords = []
+    if isinstance(geom, Point):
+        coords.append((geom.y, geom.x))
+    elif isinstance(geom, (Polygon, MultiPolygon, MultiPoint, GeometryCollection)):
+        for g in gpd.GeoSeries([geom]).explode(ignore_index=True):
+            if isinstance(g, Point):
+                coords.append((g.y, g.x))
+            elif hasattr(g, "exterior"):
+                coords.extend([(p[1], p[0]) for p in g.exterior.coords])
+    return coords
 
 # =========================================================
 # LAYOUT
@@ -199,26 +222,21 @@ col_map, col_chart = st.columns((3,1), gap="small")
 with col_map:
     map_data = st_folium(m, height=500, returned_objects=["all_drawings"], use_container_width=True)
 
-    # Only last drawn feature shown in table (polygon or marker)
-    if map_data and "all_drawings" in map_data and map_data["all_drawings"]:
-        last_feature = map_data["all_drawings"][-1]
-        geom = shape(last_feature["geometry"])
-
-        if isinstance(geom, Point):
-            coords_df = pd.DataFrame([[geom.y, geom.x]], columns=["Latitude","Longitude"])
-        else:
-            coords_df = pd.DataFrame([(p.y, p.x) for p in gpd.GeoSeries([geom]).explode(ignore_index=True).geometry], columns=["Latitude","Longitude"])
-
-        st.subheader("📌 Drawn Points / Polygon Vertices")
-        st.dataframe(coords_df)
-        if st.download_button("⬇️ Download coordinates as CSV", coords_df.to_csv(index=False), "coordinates.csv", "text/csv"):
-            st.success("CSV generated!")
+    drawn_points_df = pd.DataFrame(columns=["Latitude","Longitude"])
+    if map_data and "all_drawings" in map_data:
+        for feature in map_data["all_drawings"]:
+            geom = shape(feature["geometry"])
+            coords_list = get_coords(geom)
+            drawn_points_df = pd.DataFrame(coords_list, columns=["Latitude","Longitude"])
+    
+    if not drawn_points_df.empty:
+        st.subheader("📝 Drawn points / polygon coordinates")
+        st.dataframe(drawn_points_df)
+        csv = drawn_points_df.to_csv(index=False)
+        st.download_button("⬇️ Download CSV", csv, "drawn_coords.csv", "text/csv")
 
 with col_chart:
-    # Population bar chart
-    if idse_selected=="No filter":
-        st.info("Select SE.")
-    else:
+    if idse_selected!="No filter":
         st.subheader("📊 Population")
         df_long = gdf_idse[["idse_new","pop_se","pop_se_ct"]].copy()
         df_long["idse_new"] = df_long["idse_new"].astype(str)
@@ -243,7 +261,7 @@ with col_chart:
             m_total = int(pts_inside["Masculin"].sum()) if not pts_inside.empty else 0
             f_total = int(pts_inside["Feminin"].sum()) if not pts_inside.empty else 0
             st.markdown(f"- 👨 **M**: {m_total}  \n- 👩 **F**: {f_total}  \n- 👥 **Total**: {m_total+f_total}")
-            
+
             fig, ax = plt.subplots(figsize=(3,3))
             if m_total + f_total > 0:
                 ax.pie([m_total,f_total], labels=["M","F"], autopct="%1.1f%%", startangle=90, colors=["#1f77b4","#ff7f0e"])
