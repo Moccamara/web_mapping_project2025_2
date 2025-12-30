@@ -39,7 +39,7 @@ def logout():
     st.session_state.username = None
     st.session_state.user_role = None
     st.session_state.points_gdf = None
-    st.experimental_rerun()  # ✅ fixed
+    st.experimental_rerun()  # ✅ updated
 
 # =========================================================
 # LOGIN
@@ -118,8 +118,10 @@ st.session_state.points_gdf = points_gdf
 # =========================================================
 def safe_sjoin(points, polygons, how="inner", predicate="intersects"):
     if points is None or points.empty or polygons is None or polygons.empty:
-        return gpd.GeoDataFrame(columns=points.columns if points is not None else [],
-                                crs=points.crs if points is not None else None)
+        return gpd.GeoDataFrame(
+            columns=points.columns if points is not None else [],
+            crs=points.crs if points is not None else None
+        )
     for col in ["index_right", "_r"]:
         if col in polygons.columns:
             polygons = polygons.drop(columns=[col])
@@ -164,12 +166,14 @@ with st.sidebar:
 # =========================================================
 minx, miny, maxx, maxy = gdf_idse.total_bounds
 m = folium.Map(location=[(miny+maxy)/2, (minx+maxx)/2], zoom_start=18)
+
 folium.TileLayer("OpenStreetMap").add_to(m)
 folium.TileLayer(
     tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
     name="Satellite",
     attr="Esri"
 ).add_to(m)
+
 m.fit_bounds([[miny,minx],[maxy,maxx]])
 
 folium.GeoJson(
@@ -194,8 +198,19 @@ if points_to_plot is not None:
 
 MeasureControl().add_to(m)
 Draw(export=True).add_to(m)
-MousePosition(position="bottomright", separator=" | ", empty_string="Move cursor",
-              lng_first=True, num_digits=6, prefix="Coordinates:").add_to(m)
+
+# =========================================================
+# ✅ LIVE CURSOR COORDINATES
+# =========================================================
+MousePosition(
+    position="bottomright",
+    separator=" | ",
+    empty_string="Move cursor",
+    lng_first=True,
+    num_digits=6,
+    prefix="Coordinates:"
+).add_to(m)
+
 folium.LayerControl(collapsed=True).add_to(m)
 
 # =========================================================
@@ -205,24 +220,27 @@ col_map, col_chart = st.columns((3,1), gap="small")
 with col_map:
     map_data = st_folium(m, height=500, returned_objects=["all_drawings"], use_container_width=True)
 
-    # ✅ Safe handling of drawn polygons/points
-    drawn_points_df = pd.DataFrame(columns=["Latitude","Longitude"])
-    if map_data is not None and map_data.get("all_drawings"):
-        for feature in map_data["all_drawings"]:
-            geom = shape(feature["geometry"])
-            coords = []
-            if geom.geom_type == "Point":
-                coords.append([geom.y, geom.x])
-            elif hasattr(geom, "exterior"):
-                coords.extend([(p[1], p[0]) for p in geom.exterior.coords])
-            drawn_points_df = pd.DataFrame(coords, columns=["Latitude","Longitude"])
-    if not drawn_points_df.empty:
-        st.subheader("📝 Drawn points / polygon coordinates")
-        st.dataframe(drawn_points_df)
-        st.download_button("⬇️ Download CSV", drawn_points_df.to_csv(index=False), "drawn_coords.csv", "text/csv")
+    # Polygon-based statistics
+    if map_data and "all_drawings" in map_data and map_data["all_drawings"]:
+        last_feature = map_data["all_drawings"][-1]
+        drawn_polygon = shape(last_feature["geometry"])
+        if drawn_polygon is not None and points_gdf is not None:
+            pts_in_polygon = points_gdf[points_gdf.geometry.within(drawn_polygon)]
+            st.subheader("🟢 Points inside drawn polygon")
+            st.markdown(f"- Total points: {len(pts_in_polygon)}")
+            if not pts_in_polygon.empty:
+                attr_cols = [c for c in ["Masculin","Feminin"] if c in pts_in_polygon.columns]
+                if attr_cols:
+                    stats = pts_in_polygon[attr_cols].sum().to_frame().T
+                    stats["Total"] = stats.sum(axis=1)
+                    st.dataframe(stats)
+                else:
+                    st.dataframe(pts_in_polygon)
 
 with col_chart:
-    if idse_selected!="No filter":
+    if idse_selected=="No filter":
+        st.info("Select SE.")
+    else:
         st.subheader("📊 Population")
         df_long = gdf_idse[["idse_new","pop_se","pop_se_ct"]].copy()
         df_long["idse_new"] = df_long["idse_new"].astype(str)
