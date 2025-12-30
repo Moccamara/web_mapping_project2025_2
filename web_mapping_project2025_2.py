@@ -6,7 +6,7 @@ from folium.plugins import MeasureControl, Draw, MousePosition
 import pandas as pd
 import altair as alt
 import matplotlib.pyplot as plt
-from shapely.geometry import shape, Point
+from shapely.geometry import shape
 
 # =========================================================
 # APP CONFIG
@@ -27,43 +27,38 @@ USERS = {
 # =========================================================
 if "auth_ok" not in st.session_state:
     st.session_state.auth_ok = False
-    st.session_state.username = None
-    st.session_state.user_role = None
+    st.session_state.username = ""
+    st.session_state.user_role = ""
     st.session_state.points_gdf = None
 
 # =========================================================
 # LOGOUT
 # =========================================================
 def logout():
-    st.session_state.auth_ok = False
-    st.session_state.username = None
-    st.session_state.user_role = None
-    st.session_state.points_gdf = None
-    st.rerun()   # ✅ force clean rerun
-
+    for k in ["auth_ok", "username", "user_role", "points_gdf"]:
+        st.session_state[k] = None
+    st.rerun()
 
 # =========================================================
-# LOGIN
+# LOGIN (ONE-CLICK FIX)
 # =========================================================
 if not st.session_state.auth_ok:
-    st.sidebar.header("🔐 Login")
+    with st.sidebar:
+        st.header("🔐 Login")
+        username = st.selectbox("User", list(USERS.keys()))
+        password = st.text_input("Password", type="password")
 
-    username = st.sidebar.selectbox("User", list(USERS.keys()))
-    password = st.sidebar.text_input("Password", type="password")
+        if st.button("Login", use_container_width=True):
+            if password == USERS[username]["password"]:
+                st.session_state.auth_ok = True
+                st.session_state.username = username
+                st.session_state.user_role = USERS[username]["role"]
+                st.success("✅ Login successful")
+                st.rerun()
+            else:
+                st.error("❌ Incorrect password")
 
-    if st.sidebar.button("Login", use_container_width=True):
-        if password == USERS[username]["password"]:
-            st.session_state.auth_ok = True
-            st.session_state.username = username
-            st.session_state.user_role = USERS[username]["role"]
-
-            st.success("✅ Login successful")
-            st.rerun()   # ✅ THIS is the key fix
-        else:
-            st.sidebar.error("❌ Incorrect password")
-
-    st.stop()   # ⛔ stop rendering rest of app UNTIL logged in
-
+    st.stop()   # ⛔ stop app UNTIL authenticated
 
 # =========================================================
 # LOAD SE POLYGONS
@@ -72,18 +67,24 @@ SE_URL = "https://raw.githubusercontent.com/Moccamara/web_mapping/master/data/SE
 
 @st.cache_data(show_spinner=False)
 def load_se_data(url):
-    gdf = gpd.read_file(url).to_crs(epsg=4326)
+    gdf = gpd.read_file(url)
+    gdf = gdf.set_crs(epsg=4326) if gdf.crs is None else gdf.to_crs(epsg=4326)
     gdf.columns = gdf.columns.str.lower().str.strip()
     gdf = gdf.rename(columns={"lregion":"region","lcercle":"cercle","lcommune":"commune"})
-    for col in ["region","cercle","commune","idse_new","pop_se","pop_se_ct"]:
+    gdf = gdf[gdf.is_valid & ~gdf.is_empty]
+
+    for col in ["region","cercle","commune","idse_new"]:
+        if col not in gdf.columns:
+            gdf[col] = ""
+    for col in ["pop_se","pop_se_ct"]:
         if col not in gdf.columns:
             gdf[col] = 0
-    return gdf[gdf.is_valid & ~gdf.is_empty]
+    return gdf
 
 gdf = load_se_data(SE_URL)
 
 # =========================================================
-# LOAD POINTS
+# LOAD CONCESSION POINTS
 # =========================================================
 POINTS_URL = "https://raw.githubusercontent.com/Moccamara/web_mapping/master/data/concession.csv"
 
@@ -107,84 +108,63 @@ points_gdf = st.session_state.points_gdf
 # =========================================================
 # SAFE SPATIAL JOIN
 # =========================================================
-def safe_sjoin(points, polygons):
-    if points is None or polygons is None or points.empty or polygons.empty:
-        return gpd.GeoDataFrame(columns=points.columns, crs=points.crs)
-    return gpd.sjoin(points, polygons, predicate="intersects")
+def safe_sjoin(points, polygons, predicate="intersects"):
+    if points is None or points.empty:
+        return gpd.GeoDataFrame()
+    return gpd.sjoin(points, polygons, predicate=predicate, how="inner")
 
 # =========================================================
-# SIDEBAR
+# SIDEBAR FILTERS
 # =========================================================
 with st.sidebar:
-    st.markdown(f"**User:** {st.session_state.username} ({st.session_state.user_role})")
+    st.image("logo/logo_wgv.png", width=200)
+    st.markdown(f"**Logged in as:** {st.session_state.username} ({st.session_state.user_role})")
     if st.button("Logout"):
         logout()
 
     st.markdown("### 🗂️ Attribute Query")
     region = st.selectbox("Region", sorted(gdf["region"].unique()))
-    cercle = st.selectbox("Cercle", sorted(gdf[gdf.region==region]["cercle"].unique()))
-    commune = st.selectbox("Commune", sorted(gdf[(gdf.region==region)&(gdf.cercle==cercle)]["commune"].unique()))
+    gdf_r = gdf[gdf["region"] == region]
 
-    gdf_sel = gdf[(gdf.region==region)&(gdf.cercle==cercle)&(gdf.commune==commune)]
+    cercle = st.selectbox("Cercle", sorted(gdf_r["cercle"].unique()))
+    gdf_c = gdf_r[gdf_r["cercle"] == cercle]
 
-    # =====================================================
-    # ✅ ADD POINT BY COORDINATES
-    # =====================================================
-    st.markdown("### 📍 Add Point by Coordinates")
-    lat = st.number_input("Latitude", format="%.6f")
-    lon = st.number_input("Longitude", format="%.6f")
+    commune = st.selectbox("Commune", sorted(gdf_c["commune"].unique()))
+    gdf_commune = gdf_c[gdf_c["commune"] == commune]
 
-    if st.button("➕ Add Point"):
-        new_point = gpd.GeoDataFrame(
-            [{"LAT":lat,"LON":lon}],
-            geometry=[Point(lon,lat)],
-            crs="EPSG:4326"
-        )
-        st.session_state.points_gdf = pd.concat(
-            [st.session_state.points_gdf, new_point],
-            ignore_index=True
-        )
-        st.success("Point added successfully")
+    idse_list = ["No filter"] + sorted(gdf_commune["idse_new"].unique())
+    idse_selected = st.selectbox("Unit_Geo", idse_list)
+
+    gdf_idse = gdf_commune if idse_selected=="No filter" else gdf_commune[gdf_commune["idse_new"]==idse_selected]
 
 # =========================================================
 # MAP
 # =========================================================
-minx, miny, maxx, maxy = gdf_sel.total_bounds
-m = folium.Map(location=[(miny+maxy)/2,(minx+maxx)/2], zoom_start=17)
+minx, miny, maxx, maxy = gdf_idse.total_bounds
+m = folium.Map(location=[(miny+maxy)/2, (minx+maxx)/2], zoom_start=18)
 
 folium.TileLayer("OpenStreetMap").add_to(m)
 folium.GeoJson(
-    gdf_sel,
-    name="SE",
-    style_function=lambda x: {"color":"blue","weight":2,"fillOpacity":0.1},
+    gdf_idse,
+    style_function=lambda x: {"color":"blue","weight":2,"fillOpacity":0.15},
     tooltip=folium.GeoJsonTooltip(fields=["idse_new","pop_se","pop_se_ct"])
 ).add_to(m)
 
-for _, r in st.session_state.points_gdf.iterrows():
-    folium.CircleMarker(
-        location=[r.geometry.y, r.geometry.x],
-        radius=4,
-        color="red",
-        fill=True
-    ).add_to(m)
+if points_gdf is not None:
+    for _, r in points_gdf.iterrows():
+        folium.CircleMarker(
+            [r.geometry.y, r.geometry.x],
+            radius=3,
+            color="red",
+            fill=True
+        ).add_to(m)
 
 MeasureControl().add_to(m)
 Draw(export=True).add_to(m)
 MousePosition(prefix="Coordinates:").add_to(m)
 folium.LayerControl().add_to(m)
 
-# =========================================================
-# LAYOUT
-# =========================================================
-col1, col2 = st.columns((3,1))
-with col1:
-    st_folium(m, height=520, use_container_width=True)
-
-with col2:
-    st.subheader("📊 Points statistics")
-    pts_inside = safe_sjoin(st.session_state.points_gdf, gdf_sel)
-    st.metric("Points in SE", len(pts_inside))
-    st.dataframe(pts_inside.drop(columns="geometry"), height=300)
+st_folium(m, height=500, use_container_width=True)
 
 # =========================================================
 # FOOTER
@@ -192,6 +172,5 @@ with col2:
 st.markdown("""
 ---
 **Geospatial Enterprise Web Mapping**  
-**Dr. Mahamadou Camara, PhD – Geomatics Engineering** © 2025
+**Dr. CAMARA MOC, PhD – Geomatics Engineering** © 2025
 """)
-
