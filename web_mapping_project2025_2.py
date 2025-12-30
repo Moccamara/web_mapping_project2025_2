@@ -161,12 +161,15 @@ with st.sidebar:
 # =========================================================
 minx, miny, maxx, maxy = gdf_idse.total_bounds
 m = folium.Map(location=[(miny+maxy)/2, (minx+maxx)/2], zoom_start=18)
+
+# Both basemaps
 folium.TileLayer("OpenStreetMap").add_to(m)
 folium.TileLayer(
     tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
     name="Satellite",
     attr="Esri"
 ).add_to(m)
+
 m.fit_bounds([[miny,minx],[maxy,maxx]])
 
 folium.GeoJson(
@@ -186,8 +189,8 @@ if points_to_plot is not None:
 # Plugins
 MeasureControl().add_to(m)
 MousePosition(position="bottomright", separator=" | ", empty_string="Move cursor", lng_first=True, num_digits=6, prefix="Coordinates:").add_to(m)
-draw_control = Draw(export=True)
-draw_control.add_to(m)
+Draw(export=True).add_to(m)
+folium.LayerControl().add_to(m)  # allow switching basemaps
 
 # =========================================================
 # LAYOUT
@@ -196,24 +199,20 @@ col_map, col_chart = st.columns((3,1), gap="small")
 with col_map:
     map_data = st_folium(m, height=500, returned_objects=["all_drawings"], use_container_width=True)
 
-    # Polygon or marker drawn
+    # Only last drawn feature shown in table (polygon or marker)
     if map_data and "all_drawings" in map_data and map_data["all_drawings"]:
-        # Last drawing
         last_feature = map_data["all_drawings"][-1]
         geom = shape(last_feature["geometry"])
-        if isinstance(geom, Point):
-            coords = [(geom.y, geom.x)]
-        else:
-            # polygon
-            coords = [(p.y, p.x) for p in gpd.GeoSeries([geom]).explode(ignore_index=True).geometry]
 
-        # Show table & download
-        if coords:
-            coords_df = pd.DataFrame(coords, columns=["Latitude","Longitude"])
-            st.subheader("📌 Drawn Points / Polygon Vertices")
-            st.dataframe(coords_df)
-            if st.download_button("⬇️ Download coordinates as CSV", coords_df.to_csv(index=False), "coordinates.csv", "text/csv"):
-                st.success("CSV generated!")
+        if isinstance(geom, Point):
+            coords_df = pd.DataFrame([[geom.y, geom.x]], columns=["Latitude","Longitude"])
+        else:
+            coords_df = pd.DataFrame([(p.y, p.x) for p in gpd.GeoSeries([geom]).explode(ignore_index=True).geometry], columns=["Latitude","Longitude"])
+
+        st.subheader("📌 Drawn Points / Polygon Vertices")
+        st.dataframe(coords_df)
+        if st.download_button("⬇️ Download coordinates as CSV", coords_df.to_csv(index=False), "coordinates.csv", "text/csv"):
+            st.success("CSV generated!")
 
 with col_chart:
     # Population bar chart
