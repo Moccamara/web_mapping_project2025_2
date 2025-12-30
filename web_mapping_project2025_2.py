@@ -39,7 +39,7 @@ def logout():
     st.session_state.username = None
     st.session_state.user_role = None
     st.session_state.points_gdf = None
-    st.experimental_rerun()
+    st.experimental_rerun()  # Safe rerun
 
 # =========================================================
 # LOGIN
@@ -57,7 +57,7 @@ if not st.session_state.auth_ok:
             st.experimental_rerun()
         else:
             st.sidebar.error("❌ Incorrect password")
-    st.stop()
+    st.stop()  # Stop until logged in
 
 # =========================================================
 # LOAD SE POLYGONS
@@ -67,10 +67,7 @@ SE_URL = "https://raw.githubusercontent.com/Moccamara/web_mapping/master/data/SE
 @st.cache_data(show_spinner=False)
 def load_se_data(url):
     gdf = gpd.read_file(url)
-    if gdf.crs is None:
-        gdf = gdf.set_crs(epsg=4326)
-    else:
-        gdf = gdf.to_crs(epsg=4326)
+    gdf = gdf.to_crs(epsg=4326) if gdf.crs else gdf.set_crs(epsg=4326)
     gdf.columns = gdf.columns.str.lower().str.strip()
     gdf = gdf.rename(columns={"lregion":"region","lcercle":"cercle","lcommune":"commune"})
     gdf = gdf[gdf.is_valid & ~gdf.is_empty]
@@ -110,9 +107,6 @@ def load_points_from_github(url):
     except:
         return None
 
-# =========================================================
-# POINTS SOURCE LOGIC
-# =========================================================
 if st.session_state.points_gdf is not None:
     points_gdf = st.session_state.points_gdf
 else:
@@ -124,10 +118,8 @@ else:
 # =========================================================
 def safe_sjoin(points, polygons, how="inner", predicate="intersects"):
     if points is None or points.empty or polygons is None or polygons.empty:
-        return gpd.GeoDataFrame(
-            columns=points.columns if points is not None else [],
-            crs=points.crs if points is not None else None
-        )
+        return gpd.GeoDataFrame(columns=points.columns if points is not None else [], 
+                                crs=points.crs if points is not None else None)
     for col in ["index_right", "_r"]:
         if col in polygons.columns:
             polygons = polygons.drop(columns=[col])
@@ -205,14 +197,17 @@ folium.LayerControl(collapsed=True).add_to(m)
 # =========================================================
 def get_coords(geom):
     coords = []
-    if isinstance(geom, Point):
-        coords.append((geom.y, geom.x))
-    elif isinstance(geom, (Polygon, MultiPolygon, MultiPoint, GeometryCollection)):
-        for g in gpd.GeoSeries([geom]).explode(ignore_index=True):
-            if isinstance(g, Point):
-                coords.append((g.y, g.x))
-            elif hasattr(g, "exterior"):
-                coords.extend([(p[1], p[0]) for p in g.exterior.coords])
+    try:
+        if isinstance(geom, Point):
+            coords.append((geom.y, geom.x))
+        elif isinstance(geom, (Polygon, MultiPolygon, MultiPoint, GeometryCollection)):
+            for g in gpd.GeoSeries([geom]).explode(ignore_index=True):
+                if isinstance(g, Point):
+                    coords.append((g.y, g.x))
+                elif hasattr(g, "exterior"):
+                    coords.extend([(p[1], p[0]) for p in g.exterior.coords])
+    except Exception:
+        pass
     return coords
 
 # =========================================================
@@ -227,7 +222,8 @@ with col_map:
         for feature in map_data["all_drawings"]:
             geom = shape(feature["geometry"])
             coords_list = get_coords(geom)
-            drawn_points_df = pd.DataFrame(coords_list, columns=["Latitude","Longitude"])
+            if coords_list:
+                drawn_points_df = pd.DataFrame(coords_list, columns=["Latitude","Longitude"])
     
     if not drawn_points_df.empty:
         st.subheader("📝 Drawn points / polygon coordinates")
